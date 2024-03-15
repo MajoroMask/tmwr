@@ -3,12 +3,18 @@ renv::install(
   c(
     # "tidyverse",
     # "tidymodels",
+
     # "recipes",
     # "parsnip",
     # "workflows",
     # "yardstick",
-    "rmarkdown",
-    "knitr"
+
+    "shiny",
+    "miniUI",
+    "rstudioapi",
+
+    # "rmarkdown",
+    # "knitr"
   )
 )
 renv::snapshot(type = "all")

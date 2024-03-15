@@ -12,6 +12,10 @@ library(tidyverse)
 library(tidymodels)
 ```
 
+```{r}
+tidymodels_prefer(quiet = TRUE)
+```
+
 # 实战：一组买房子的数据
 
 使用的数据是一组爱荷华州Ames的房屋销售数据。构建模型的目的是预测房屋售价。
@@ -55,7 +59,7 @@ ggplot(ames, aes(x = Sale_Price)) +
 ames <- ames %>% mutate(Sale_Price = log10(Sale_Price))
 ```
 
-## Spending data
+## 数据预算和数据分层
 
 在建模过程中，比较好的实践是对数据的使用规划“预算”。
 
@@ -66,3 +70,210 @@ ames <- ames %>% mutate(Sale_Price = log10(Sale_Price))
 ### 分数据
 
 最简单的是分两份：训练集和测试集。但是怎么分呢？
+
+```{r}
+set.seed(501)
+
+# rsample：取样的包
+ames_split <- rsample::initial_split(ames, prop = 0.8)
+ames_split
+```
+
+```{r}
+ames_train <- rsample::training(ames_split)  # 获取训练集
+ames_test <- rsample::testing(ames_split)  # 获取测试集
+
+dim(ames_train)
+```
+
+更多的情况下，随机取样并不合适，需要分层抽样（stratafied sampling）。
+
+- 用分层抽样几乎没缺点。
+
+```{r}
+set.seed(502)
+ames_split <- initial_split(ames, prop = 0.8, strata = Sale_Price)
+ames_train <- training(ames_split)
+ames_test <- testing(ames_split)
+
+dim(ames_train)
+```
+
+```{r}
+summary(ames_train$Sale_Price)
+summary(ames_test$Sale_Price)
+```
+
+当变量中有时序变量时，最好使用最近的数据作为测试集。这时使用`rsample::initial_time_split()`按数据本身的顺序进行取样，所以使用前要先对数据按时序变量做排序。
+
+### 验证集
+
+当需要使用验证集（validation set）时，可以使用：
+
+```{r}
+set.seed(52)
+# 6/2/2分成
+ames_val_split <- rsample::initial_validation_split(
+  ames, 
+  prop = c(0.6, 0.2),  # for train and val, the rest goes to test
+  strata = Sale_Price
+)
+ames_val_split
+
+# ames_train <- training(ames_val_split)
+# ames_test <- testing(ames_val_split)
+# ames_val <- rsample::validation(ames_val_split)
+```
+
+### 小tips
+
+- 数据分层应该发生在数据点相互独立的那一层。
+  + 纵向数据中，一个数据点可能进行多次重复取样。比如一个患者的术后随访，分层应该对患者分，而不是随访检测，保证同一个患者的所有检测都被分到同一个分层中。
+- 测试集要保证和模型构建过程隔离，避免信息泄漏（information leakage）。
+  + 在构建阶段使用测试集数据可以是间接的，且需要避免。例如只使用在训练集中，和测试集特征最接近的数据点进行模型构建。
+- 不要滥用训练集的子集，要用就全用。
+- 确保测试集总能代表新增数据。
+- 确保数据在不同的任务中不被复用/滥用，进而导致过拟合和偏倚。
+- 在模型确定之后，可以用全部数据进行参数优化。
+
+## 用`parsnip`包拟合模型
+
+数据确定了就可以拟合模型了。`Tidymodels`的接口分三步：
+
+- 选择模型结构：比如线性回归，随机森林，KNN，etc
+- 选择一个“引擎”：在线性回归模型里，可以选来自`rstanarm`包或者`glmnet`包提供的函数，这些都是“引擎”，`parsnip`包底层整理这些函数到统一的接口。
+- （可选）声明模型的模式：
+  + 有的模型适用于不同类型的变量，连续型变量就是回归，离散型变量就是分类。
+  + 有的模型只适用于一种类型的变量，不需要声明模式。
+
+```{r}
+# 使用不同引擎的建模：
+linear_reg() %>% set_engine("lm")
+linear_reg() %>% set_engine("glmnet") 
+linear_reg() %>% set_engine("stan")
+```
+
+`parsnip`的接口如何处理代码：
+
+```{r}
+linear_reg() %>% set_engine("lm") %>% parsnip::translate()
+```
+
+注意到`missing_arg()`作为占位符。
+
+### 实例
+
+```{r}
+lm_model <- 
+  linear_reg() %>% 
+  set_engine("lm")
+lm_form_fit <- 
+  lm_model %>% 
+  fit(Sale_Price ~ Longitude + Latitude, data = ames_train)
+  # fit()是泛函，parsnip给加了方法
+
+lm_xy_fit <- 
+  lm_model %>% 
+  fit_xy(
+    x = ames_train %>% select(Longitude, Latitude),
+    y = ames_train %>% pull(Sale_Price)
+  )
+
+# 据说fix_xy()不会创建dummy predictor变量，再之后有说明
+```
+
+```{r}
+lm_form_fit
+```
+
+```{r}
+lm_xy_fit
+```
+
+`parsnip`的接口在处理传递给模型函数的参数时，会把参数分成两类：
+
+- 常用的，一般是必须给的，同一个功能其它函数也泛用的。比如数据，比如随机森林的`tree`。
+- 非泛用的，一般是这个函数独有的。比如`ranger::ranger(num.threads = 1)`。
+  + 这类参数`parsnip`接口会给出默认，可以通过`set_engine()`修改。
+
+`parsnip`模型的结果保存在`parsnip::model_fit`对象里，通过`extract_fit_engine()`可以提取拟合好的模型。
+
+```{r}
+extract_fit_engine(lm_form_fit)
+```
+
+拟合结果一般可以直接拿来用：
+
+```{r}
+lm_form_fit %>% extract_fit_engine() %>% plot()
+```
+
+把模型结果保存并提取信息的功能，还能更进一步：
+
+```{r}
+model_res <- 
+  lm_form_fit %>% 
+  extract_fit_engine() %>% 
+  summary()
+param_est <- coef(model_res)  # lm模型的相关系数表
+
+class(param_est)
+param_est
+```
+
+提取信息还能再进一步
+
+```{r}
+broom::tidy(lm_form_fit)
+```
+
+### `parsnip`对`predict()`的接口
+
+简单来说就是返回`tibble`，更直给，且输出匹配输入（数量/顺序/...）。
+
+```{r}
+ames_test_small <- ames_test %>% slice(1:5)
+predict(lm_form_fit, new_data = ames_test_small)
+```
+
+好处非常明显：
+
+```{r}
+ames_test_small %>% 
+  select(Sale_Price) %>% 
+  bind_cols(
+    predict(lm_form_fit, ames_test_small)
+  ) %>% 
+  bind_cols(
+    predict(lm_form_fit, ames_test_small, type = "pred_int")
+    # 置信区间，具体会返回什么参考`help(predict.model_fit)` 
+  )
+```
+
+整个操作下来，会发现`parsnip`接口的一致性：
+
+```{r}
+# 换成决策树模型
+tree_model <- 
+  decision_tree(min_n = 2) %>% 
+  set_engine("rpart") %>% 
+  set_mode("regression")
+tree_fit <- 
+  tree_model %>% 
+  fit(Sale_Price ~ Longitude + Latitude, data = ames_train)  # 完全一致
+ames_test_small %>% 
+  select(Sale_Price) %>% 
+  bind_cols(
+    predict(tree_fit, ames_test_small)
+  )
+```
+
+### `parsnip`接口的扩展
+
+- 已经支持的包和模型可通过[官网](https://www.tidymodels.org/find/)查询。
+- 也可通过`parsnip_addin()`调出的界面来查询，这些支持不全在`parsnip`包里。
+  + 能调出一个生成模板代码的shiny app，帅~
+
+```{r}
+parsnip_addin()
+```
