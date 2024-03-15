@@ -1,0 +1,220 @@
+---
+title: "Tidy model with R 笔记"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r init}
+library(tidyverse)
+library(broom)
+```
+
+
+- 预览 *Ctrl+Shift+K*
+
+# 1 概念
+
+## 模型类型
+
+- descriptive model 描述性模型
++ 通常用于判断和展示数据的某种特征或趋势
+- inferential model 推论性模型
++ 用于解释问题或验证假设
++ 常见的假设检验都属于这类
+- predictive model 预测性模型
++ 计算预测值，确保预测值和新数据真实值之间的保真度足够高
++ 关注的是预测值本身，而非预测方法；同时关注预测的偏差
+
+- 特定模型可以同时属于以上三种模型类型，看你怎么用
+
+## 另外一些术语
+
+- 监督supervised和非监督unsupervised
++ supervised models分两大类：回归regression和分类classification。
+
+# 2 Tidyverse intro
+
+直接跳过。
+
+# 3 base R modeling
+
+## 一个例子
+
+```{r}
+data(crickets, package = "modeldata")
+glimpse(crickets)
+# help(package = "modeldata")
+```
+
+```{r}
+p <- 
+  ggplot(
+    crickets, 
+    aes(x = temp, y = rate, color = species, shape = species, linetype = species)
+  ) + 
+  geom_point(size = 2) + 
+  geom_smooth(method = lm, se = FALSE, alpha = 0.5) + 
+  scale_color_brewer(palette = "Paired") +
+  theme_bw() +
+  labs(x = "Temperature (C)", y = "Chirp Rate (per minute)")
+p
+```
+
+R的formula提供好多语法糖：
+
+- `y ~ x + z + x:z`可以简写成`y ~ (x + z)^2`或者`y ~ x * z`，
+- `y ~ (x + z + w)^3`包括了所有单因素，双因素和三因素组合
+- `y ~ (.)^3` 所有不在波浪号左边的变量都被包含在`.`里
+- `y ~ I( (Celsius * 9/5) + 32 )`从摄氏转华氏，用`I()`函数引入计算，或者其它更华丽的函数
+
+```{r}
+# help(formula)
+```
+
+回到例子：
+
+```{r}
+interaction_fit <- lm(rate ~ (temp + species)^2, data = crickets)
+
+print(interaction_fit)
+```
+
+下推论之前，应该先诊断模型！
+
+```{r}
+par(mfrow = c(1, 2))
+
+# Show residuals vs predicted values:
+plot(interaction_fit, which = 1)
+# A normal quantile plot on the residuals:
+plot(interaction_fit, which = 2)
+```
+
+测试一个不怎么地的模型：
+
+```{r}
+# 去掉了interaction
+main_effect_fit <-  lm(rate ~ temp + species, data = crickets)
+
+anova(main_effect_fit, interaction_fit)  # 方差分析
+```
+
+p值为0.25，不能否定原假设（两个模型没差别），说明两个模型没差别，说明interaction影响不大。
+
+别忘了做模型诊断：
+
+```{r}
+par(mfrow = c(1, 2))
+plot(main_effect_fit, which = 1)
+plot(main_effect_fit, which = 2)
+```
+
+模型的更多统计信息：
+
+```{r}
+summary(main_effect_fit)
+```
+
+解释：
+
+- 气温每变化1（摄氏度），这两个种的蟋蟀叫叫频率都上升3.6，p值显著
+- 在所有温度下，O.niveus的叫叫频率比O. exclamationis小10，同样p值显著
+- 截距：两个种的蟋蟀在0摄氏度时叫叫频率为`-7.2`，这个外推（extrapolation）明显不对。所以该模型只在检测的温度区间内比较合理。
+
+如果需要预测的话，可以用`predict()`函数：
+
+```{r}
+tb_new_value <- tibble(species = "O. exclamationis", temp = 15:20)
+predict(main_effect_fit, tb_new_value)
+```
+
+## R modeling系统的问题
+
+最大的问题就是inconsistency吧，不同作者开发的package有各自的习惯，对缺失值的处理也各不相同。
+
+```{r}
+# 引入缺失值
+tb_new_value$temp[1] <- NA
+
+predict(main_effect_fit, tb_new_value)
+```
+
+换一种缺失值处理方式：
+
+```{r, error=TRUE}
+predict(main_effect_fit, tb_new_value, na.action = na.fail)
+```
+
+再换一种：
+
+```{r}
+predict(main_effect_fit, tb_new_value, na.action = na.omit)
+```
+
+## 结合`tidymodel`和`base R`
+
+`tidymodels`提供一系列接口，让模型结果格式符合`tidyverse`的设计理念：
+
+```{r}
+corr_res <- purrr::map(
+  .x = mtcars %>% select(-mpg),
+  .f = ~ cor.test(x = .x, y = mtcars$mpg)
+)
+
+length(corr_res)  # a list of length 10
+corr_res[[1]]
+```
+
+用`tidymodels`整理上述模型：
+
+```{r}
+broom::tidy(corr_res[[1]])
+```
+
+批量整理顺便画图：
+
+```{r}
+corr_res %>% 
+  purrr::map_dfr(.f = broom::tidy, .id = "predictor") %>% 
+  ggplot(aes(x = fct_reorder(predictor, estimate))) +
+  geom_point(aes(y = estimate)) +
+  geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+  theme_bw() +
+  labs(x = NULL, y = "Correlation with `mpg`")
+```
+
+另一个例子：使用`crickets`数据，但是对不同种分开建模。
+
+```{r}
+data_by_species <- 
+  crickets %>% 
+  group_nest(species)
+glimpse(data_by_species)
+```
+
+这里用到了`dplyr`的`list-column`功能。
+
+```{r}
+model_by_species <- 
+  data_by_species %>% 
+  mutate(
+    model = purrr::map(data, .f = ~ lm(rate ~ temp, data = .x))
+  )
+model_by_species
+```
+
+```{r}
+model_by_species %>% 
+  mutate(coef = purrr::map(model, .f = broom::tidy)) %>% 
+  select(species, coef) %>% 
+  unnest(cols = c(coef))
+```
+
+见证`tidymodels`：
+
+```{r}
+library(tidymodels)
+```

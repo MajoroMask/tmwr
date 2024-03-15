@@ -1,0 +1,68 @@
+---
+title: "Tidy model with R 笔记"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+```
+
+# 实战：一组买房子的数据
+
+使用的数据是一组爱荷华州Ames的房屋销售数据。构建模型的目的是预测房屋售价。
+
+```{r}
+data(ames, package = "modeldata")
+
+dim(ames)
+
+glimpse(ames)
+```
+
+## 熟悉数据，开始探索性分析
+
+```{r}
+ggplot(ames, aes(x = Sale_Price)) + 
+  geom_histogram(bins = 50, col= "white") +
+  theme_bw()
+```
+
+使用log变换的考量：
+
+- 变换之后，预测的售价不会为负。
+- 变换之后，对离群值（高售价房屋）的预测不会特别离谱。
+- 统计学上看，log变换可以稳定方差
+
+用log变换的缺点：
+
+- 均方根误差（root mean square error, RMSE）用来评价回归模型，计算RMSE要用残差。如果残差是log transformed那RMSE会令人难以理解。
+
+```{r}
+ggplot(ames, aes(x = Sale_Price)) + 
+  geom_histogram(bins = 50, color = "white") +
+  scale_x_log10() +
+  theme_bw()
+```
+
+不管怎样，还是用log transfered数据做后续分析：
+
+```{r}
+ames <- ames %>% mutate(Sale_Price = log10(Sale_Price))
+```
+
+## Spending data
+
+在建模过程中，比较好的实践是对数据的使用规划“预算”。
+
+- 对某个模型只使用有限的数据进行建模。
+  + 数据的选择根据经验或数据特征，有方法。
+  + 好处是避免放大bias，或者方法学错误的积累。
+
+### 分数据
+
+最简单的是分两份：训练集和测试集。但是怎么分呢？
