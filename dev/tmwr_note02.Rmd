@@ -16,7 +16,7 @@ library(tidymodels)
 tidymodels_prefer(quiet = TRUE)
 ```
 
-# 实战：一组买房子的数据
+# 4 实战：一组买房子的数据
 
 使用的数据是一组爱荷华州Ames的房屋销售数据。构建模型的目的是预测房屋售价。
 
@@ -28,7 +28,7 @@ dim(ames)
 glimpse(ames)
 ```
 
-## 熟悉数据，开始探索性分析
+##  熟悉数据，开始探索性分析
 
 ```{r}
 ggplot(ames, aes(x = Sale_Price)) + 
@@ -67,7 +67,7 @@ ames <- ames %>% mutate(Sale_Price = log10(Sale_Price))
   + 数据的选择根据经验或数据特征，有方法。
   + 好处是避免放大bias，或者方法学错误的积累。
 
-### 分数据
+# 5 分数据
 
 最简单的是分两份：训练集和测试集。但是怎么分呢？
 
@@ -136,7 +136,7 @@ ames_val_split
 - 确保数据在不同的任务中不被复用/滥用，进而导致过拟合和偏倚。
 - 在模型确定之后，可以用全部数据进行参数优化。
 
-## 用`parsnip`包拟合模型
+# 6 用`parsnip`包拟合模型
 
 数据确定了就可以拟合模型了。`Tidymodels`的接口分三步：
 
@@ -274,6 +274,6 @@ ames_test_small %>%
 - 也可通过`parsnip_addin()`调出的界面来查询，这些支持不全在`parsnip`包里。
   + 能调出一个生成模板代码的shiny app，帅~
 
-```{r}
-parsnip_addin()
+```{r, eval=FALSE}
+parsnip::parsnip_addin()
 ```

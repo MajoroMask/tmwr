@@ -1,0 +1,236 @@
+---
+title: "Tidy model with R 笔记"
+output:
+  html_document:
+    df_print: paged
+editor_options:
+  chunk_output_type: inline
+---
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+```
+
+```{r}
+tidymodels_prefer(quiet = TRUE)
+```
+
+前情提要：
+
+```{r}
+data(ames)
+ames <- mutate(ames, Sale_Price = log10(Sale_Price))
+
+set.seed(502)
+ames_split <- initial_split(ames, prop = 0.80, strata = Sale_Price)
+ames_train <- training(ames_split)
+ames_test  <-  testing(ames_split)
+
+lm_model <- linear_reg() %>% set_engine("lm")
+```
+
+# 7 model workflow
+
+## 模型的起点和终点
+
+理论上前情提要里的代码已经开始了狭义的建模过程，但实践中在走到这里之前要先考虑点别的：
+
+- 并不是所有的自变量（independent variables，IV）都应该被纳入建模，在建模之前需要有一步feature selection
+- IV缺失值的处理
+- IV的变换（log/PCA/）
+
+另外还有一些后处理，所以建模不止是把模型建出来这么简单。前后处理加上fitting本身，就是所谓的model workflow（或者叫pipeline）。
+
+## 用`workflows`包实现
+
+```{r}
+lm_wflow <- workflow() %>% add_model(lm_model)
+lm_wflow
+```
+
+这里的preprocessor可以是formula：
+
+```{r}
+lm_wflow <- lm_wflow %>% add_formula(Sale_Price ~ Longitude + Latitude)
+lm_wflow
+```
+
+`workflow`对象有`fit()`方法：
+
+```{r}
+lm_fit <- fit(lm_wflow, data = ames_train)
+lm_fit
+
+class(lm_fit)  # 注意到`lm_fit`仍然是workflow对象
+```
+
+`workflow`对象的`predict()`方法：
+
+```{r}
+predict(lm_fit, new_data = ames_test %>% slice(1:3))
+```
+
+改变/移除模型参数：
+
+```{r}
+lm_fit %>% update_formula(Sale_Price ~ Longitude)
+# 可以注意到之前拟合的模型被移除了
+
+# lm_fit %>% remove_formula()  # 干脆移除
+```
+
+想使用原创IV，先要引入对应的接口：
+
+```{r}
+lm_wflow <- 
+  lm_wflow %>% 
+  remove_formula() %>% 
+  add_variables(
+    outcomes = Sale_Price, 
+    predictors = c(Longitude, Latitude)
+    # predictors支持tidy-selection，比如
+    # predictors = c(ends_with("tude"))  # 或者
+    # predictors = everything()
+  )
+lm_wflow
+# 注意到preprocessor的变化
+```
+
+重新拟合：
+
+```{r}
+fit(lm_wflow, data = ames_train)
+```
+
+## 但还是得用`formula`，怎么办？
+
+- 直接用变量，就不能用`formula`对象的语法了
+- 有些engine使用比较特殊的`formula`语法
+
+```{r, eval=FALSE}
+library(lme4)
+lmer(distance ~ Sex + (age | Subject), data = Orthodont)  # 比如这里的|
+```
+
+使用`add_model(formula)`修改`add_variables()`：
+
+```{r}
+library(multilevelmod)  # 支持parsnip使用lmer的线性模型
+
+multilevel_spec <- linear_reg() %>% set_engine("lmer")
+
+multilevel_workflow <- 
+  workflow() %>% 
+  add_variables(outcome = distance, predictors = c(Sex, age, Subject)) %>% 
+  add_model(
+    multilevel_spec, 
+    # This formula is given to the model
+    formula = distance ~ Sex + (age | Subject)
+  )
+
+multilevel_fit <- fit(multilevel_workflow, data = nlme::Orthodont)
+multilevel_fit
+```
+
+```{r}
+library(censored)  # package `survival` is required
+
+parametric_spec <- survival_reg()
+
+parametric_workflow <- 
+  workflow() %>% 
+  add_variables(outcome = c(fustat, futime), predictors = c(age, rx)) %>% 
+  add_model(
+    parametric_spec, 
+    formula = Surv(futime, fustat) ~ age + strata(rx)
+  )
+
+parametric_fit <- fit(parametric_workflow, data = ovarian)
+parametric_fit
+```
+
+## 快速迭代
+
+```{r}
+# 比如说，同时测试以下preprocessors
+location <- list(
+  longitude = Sale_Price ~ Longitude,
+  latitude = Sale_Price ~ Latitude,
+  coords = Sale_Price ~ Longitude + Latitude,
+  neighborhood = Sale_Price ~ Neighborhood
+)
+```
+
+`workflowsets`包提供向量化的`workflow`支持：
+
+```{r}
+library(workflowsets)
+
+location_models <- workflow_set(preproc = location, models = list(lm = lm_model))
+# preproc可以是各种preprocessor，formula，recipe，或者workflow_variables()
+
+location_models
+
+location_models$info[[1]]
+
+extract_workflow(location_models, id = "coords_lm")
+```
+
+加入`fit()`：
+
+```{r}
+# 因为`workflow_set`对象也是`tbl_df`，所以：
+location_models <- 
+  location_models %>% 
+  mutate(
+    fit = purrr::map(  # 现在现用purrr::map，之后有更好的办法
+      info,
+      .f = ~ fit(.x$workflow[[1]], data = ames_train)
+    )
+  )
+
+location_models  # 多了fit列
+
+location_models$fit[[1]]
+```
+
+## `last_fit()`：打完收工
+
+`workflow`对象经过反复迭代后获得最终版本， 这时需要用测试集进行评估：
+
+```{r}
+lm_res_final <- last_fit(lm_wflow, ames_split, add_validation_set = FALSE)
+# 对有验证集的数据而言，add_validation_set = TRUE会合并训练集和验证集
+lm_res_final
+```
+
+提取其中的`workflow`：
+
+```{r}
+lm_wflow_final <- extract_workflow(lm_res_final)
+```
+
+提取其中的评估结果（之后会细讲）：
+
+```{r}
+collect_metrics(lm_res_final)  # 评估指标
+collect_predictions(lm_res_final)  # 测试集的预测结果
+```
+
+# 8 用`recipes`进行feature engineering
+
+简单起步：
+
+```{r}
+simple_ames <- 
+  recipe(
+    Sale_Price ~ Neighborhood + Gr_Liv_Area + Year_Built + Bldg_Type,
+    data = ames_train
+  ) %>% 
+  step_log(Gr_Liv_Area, base = 10) %>%   # log10(Gr_Liv_Area)
+  step_dummy(all_nominal_predictors())  # all nominal into numeric
+
+simple_ames  # TODO
+```
+
