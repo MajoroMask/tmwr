@@ -220,7 +220,7 @@ collect_predictions(lm_res_final)  # 测试集的预测结果
 
 # 8 用`recipes`进行feature engineering
 
-简单起步：
+## 简单起步
 
 ```{r}
 simple_ames <- 
@@ -229,8 +229,219 @@ simple_ames <-
     data = ames_train
   ) %>% 
   step_log(Gr_Liv_Area, base = 10) %>%   # log10(Gr_Liv_Area)
-  step_dummy(all_nominal_predictors())  # all nominal into numeric
+  step_dummy(all_nominal_predictors())
+# all nominal into numeric, see `?has_role` for more details
 
-simple_ames  # TODO
+simple_ames
 ```
 
+好处显而易见，拆分了原来写在`formula`里的各种功能，对象化。
+
+用到`workflow`对象里：
+
+```{r, error=TRUE}
+lm_wflow %>% 
+  add_recipe(simple_ames)
+# preprocessing只能有一个
+```
+
+```{r}
+lm_wflow <- 
+  lm_wflow %>% 
+  remove_variables() %>% 
+  add_recipe(simple_ames)
+lm_wflow
+```
+
+```{r}
+lm_fit <- fit(lm_wflow, ames_train)
+# 值得注意的是，recipe(data = )并不引入建模用数据，
+# 只是让recipe确认变量名称和变量类型
+
+lm_fit %>% extract_fit_engine() %>% plot(ask = FALSE)
+```
+
+`predict()`同样适用
+
+```{r}
+predict(lm_fit, new_data = ames_test %>% slice(1:5))
+```
+
+获取模型参数：
+
+```{r}
+lm_fit %>% 
+  extract_fit_parsnip() %>% 
+  tidy() %>% 
+  slice(1:5)
+```
+
+## 举例展示常用的`step_*()`函数
+
+### factor
+
+`Neighborhood`变量的分层太多，需要合并整理：
+
+```{r}
+ggplot(ames_train) + geom_bar(aes(x = Neighborhood)) + coord_flip()
+```
+
+可以用到的函数：
+
+- `step_unknown()`：recode `NA`s
+- `step_novel()`：增加新level
+- `step_other()`：合并旧level
+
+修改recipe：
+
+```{r}
+simple_ames <- 
+  recipe(
+    Sale_Price ~ Neighborhood + Gr_Liv_Area + Year_Built + Bldg_Type,
+    data = ames_train
+  ) %>% 
+  step_log(Gr_Liv_Area, base = 10) %>%   # log10(Gr_Liv_Area)
+  step_other(Neighborhood, threshold = 0.01, other = "Other") %>% 
+  step_dummy(all_nominal_predictors(), naming = dummy_names)
+
+# tips 1：
+# R把因子转换成整数型变量时（`step_dummy()`），如果因子有x个水平，
+# 结果默认为`x - 1`个变量（值只有0/1），全0表示那个被隐去的变量。
+# 这么做的目的是追求simplicity，增加模型内变量之间的独立性。
+# 可以通过`step_dummy(one_hot = FALSE)`禁用此特性。
+
+# tips 2：
+# step_dummy(naming = dummy_names()) 可以改dummy predictors的命名规则
+
+simple_ames
+```
+
+### interaction terms
+
+统计学中的相互作用项，在数学上一般用乘积来表现。就使用的数据例子而言，`Gr_Liv_Area`和`Bldg_Type`似乎有交互作用项：不同建筑类型下，生活面积的增长和售价增长的关系变化趋势不同：
+
+```{r}
+ames_train %>% 
+  mutate(log10_sp = log10(Sale_Price + 1)) %>% 
+  ggstatsplot::grouped_ggscatterstats(
+    x = Gr_Liv_Area,
+    y = log10_sp,
+    grouping.var = Bldg_Type,
+    xsidehistogram.args = list(bins = 50),
+    ysidehistogram.args = list(bins = 50)
+  )
+```
+
+修改recipe:
+
+```{r}
+simple_ames <- 
+  recipe(
+    Sale_Price ~ Neighborhood + Gr_Liv_Area + Year_Built + Bldg_Type,
+    data = ames_train
+  ) %>% 
+  step_log(Gr_Liv_Area, base = 10) %>%   # log10(Gr_Liv_Area)
+  step_other(Neighborhood, threshold = 0.01, other = "Other") %>% 
+  step_dummy(all_nominal_predictors(), naming = dummy_names) %>% 
+  step_interact(
+    terms = ~ Gr_Liv_Area:starts_with("Bldg_Type_")
+    # 注意：`step_interact()`放在`step_dummy()`之后的话，
+    # Bldg_Type已经被拆分成dummy predictors了。
+    # 这个feature使得recipe的构建跟顺序有关，给予使用者更多抛瓦。
+    # 同理，这里的`Gr_liv_Area`已经是log10之后的了。
+  )
+simple_ames
+```
+
+### 样条 spline
+
+简单来说就是给变量增加光滑性的变换。样条函数允许的次幂越大，曲线越光滑，当然过拟合也更严重。
+
+在recipe中可通过`step_ns()`实现：
+
+```{r}
+x <- 
+  recipe(
+    Sale_Price ~ Neighborhood + Gr_Liv_Area + Year_Built + Bldg_Type,
+    data = ames_train
+  ) %>% 
+  step_log(Gr_Liv_Area, base = 10) %>%   # log10(Gr_Liv_Area)
+  step_other(Neighborhood, threshold = 0.01, other = "Other") %>% 
+  step_dummy(all_nominal_predictors(), naming = dummy_names) %>% 
+  step_interact(terms = ~ Gr_Liv_Area:starts_with("Bldg_Type_")) %>% 
+  step_ns(Latitude, deg_free = 20)  # add natural spline
+x
+
+# 注意这个例子可能不好，因为`Latitude`和`Neighborhood`反映的都是房屋位置信息
+```
+
+### 特征提取
+
+例如PCA是一个线性特征提取器（新特征是原有特征的线性组合），另外PCA产生的新特征之间相互独立，所以可以改善特征之间互相勾连的情况。
+
+```{r}
+# ames数据中和面积有关的指标：
+colnames(ames_train) %>% str_subset("(_SF$)|(Gr_Liv_)")
+
+# 通过`step_pca()`增加PCA的特征提取：
+x <-
+  recipe(Sale_Price ~ Neighborhood, ames_train) %>%
+  step_rm(Neighborhood) %>% 
+  step_pca(matches("(_SF$)|(Gr_Liv_)"))
+# 注意：这里虽然没做（因为不需要），
+# 但使用PCA之前要make sure that all predictors are normalized,
+# in which case, the `step_normalize()` can be applied
+
+x_wf <- workflow() %>% add_model(lm_model) %>% add_recipe(x)
+fit(x_wf, ames_train)
+#
+# TODO 这个代码不太对，后面学会了再回来改
+# 有可能只保留PCA引入的新变量吗？
+```
+
+除了PCA之外，还有一些常用的特征提取方式：
+
+- ICA independent component analysis 独立成分分析
+- NNMF non-negative matrix factorization 非负矩阵分解
+- UMAP uniform manifold approximation and projection 均匀流形近似和投影（wtf?）
+- MDS multidimentional scaling 多维标度变换
+
+### resampling
+
+resampling作为调整class imbalance的手段，有以下常用方式：
+
+- Downsampling：减少majority样品数量，以提高minority class比重
+- Upsampling：插入minority class的样品以提高比重（人造新的或者重复旧的）
+- hybrid：混合上面两种
+
+在`themis`包中提供resampling用的`step_*()`函数。
+
+```{r}
+recipe(Sale_Price ~ Neighborhood, ames_train) %>% 
+  themis::step_downsample(Neighborhood)
+```
+
+除此之外，`step_filter()`，`step_arrange()`之类的也会改变行。
+
+值得注意的是，这些`step_*()`函数都有`skip`参数且默认为`TRUE`，用来控制变动在训练集内。
+
+### 爱来自`dplyr`
+
+既然有`step_filter()`，那`step_mutate()`就很好理解了
+
+```{r}
+recipe(Sale_Price ~ Neighborhood, ames_train) %>% 
+  step_mutate(b2b_ratio = Bedroom_AbvGr / Full_Bath)  # bedroom to bathroom size ratio
+```
+
+### 自然语言处理
+
+详见`textrecipes`包。
+
+## `step_*(skip)`
+
+- 前面提到过了，`skip = TRUE`说明这条recipe不会应用于`predict()`。
+- 为了避免information leakage，对`outcomes`或者叫`DV dependendent variables，因变量`的调整，最好独立在recipe之外。
+  - 在这个例子里，是指对`Sale_Price`取log10。
+
+# TODO
